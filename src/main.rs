@@ -2,12 +2,8 @@ use eframe::egui;
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::high_level::Event::*;
 use nvml_wrapper::struct_wrappers::device::MemoryInfo;
-use nvml_wrapper::{
-    error::{NvmlError, NvmlErrorWithSource},
-    high_level::{EventLoop, EventLoopProvider},
-    Device, Nvml,
-};
-use std::sync::mpsc::{self, channel, Receiver, Sender};
+use nvml_wrapper::{error::NvmlError, high_level::EventLoopProvider, Nvml};
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 fn event_loop_thread(tx: Sender<DeviceState>) {
     let nvml = Nvml::init().unwrap();
@@ -23,7 +19,7 @@ fn event_loop_thread(tx: Sender<DeviceState>) {
                     let device_state = DeviceState {
                         name: device.name().unwrap(),
                         temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
-                        mem_info: device.memory_info().unwrap()
+                        mem_info: device.memory_info().unwrap(),
                     };
                     tx.send(device_state).unwrap();
                 } else {
@@ -50,7 +46,6 @@ fn event_loop_thread(tx: Sender<DeviceState>) {
     });
 }
 
-
 struct DeviceState {
     name: String,
     temperature: u32,
@@ -73,10 +68,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "nvmsi-gui",
         options,
-        Box::new(|cc| Ok(Box::new(MyApp::new(rx)))),
+        Box::new(|_cc| Ok(Box::new(MyApp::new(rx)))),
     )
 }
-
 
 struct MyApp {
     rx: Receiver<DeviceState>,
@@ -105,9 +99,18 @@ impl eframe::App for MyApp {
             if let Some(device) = &self.current_state {
                 ui.label(format!("name: {}", device.name));
                 ui.label(format!("temperature: {}°C", device.temperature));
-                ui.label(format!("memory free: {}", device.mem_info.free));
-                ui.label(format!("memory total: {}", device.mem_info.total));
-                ui.label(format!("memory used: {}", device.mem_info.used));
+                ui.label(format!(
+                    "memory free: {} MB",
+                    device.mem_info.free / 1_000_000
+                ));
+                ui.label(format!(
+                    "memory total: {} MB",
+                    device.mem_info.total / 1_000_000
+                ));
+                ui.label(format!(
+                    "memory used: {} MB",
+                    device.mem_info.used / 1_000_000
+                ));
             } else {
                 ui.label("Waiting for data...");
             }
