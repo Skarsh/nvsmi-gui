@@ -25,7 +25,7 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
             let cuda_driver_version = nvml.sys_cuda_driver_version().unwrap();
             let running_graphics_processes = device.running_graphics_processes().unwrap();
 
-            let process_names: Vec<String> = running_graphics_processes
+            let graphics_process_names: Vec<String> = running_graphics_processes
                 .iter()
                 .map(|process| {
                     nvml.sys_process_name(process.pid, 64)
@@ -33,14 +33,42 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
                 })
                 .collect();
 
-            let process_data_vec = running_graphics_processes
+            let graphics_process_data_vec: Vec<ProcessData> = running_graphics_processes
                 .iter()
-                .zip(process_names)
+                .zip(graphics_process_names)
                 .map(|(process_info, process_name)| ProcessData {
                     process_info: process_info.clone(),
+                    process_kind: ProcessKind::Graphics,
                     process_name,
                 })
                 .collect();
+
+            let running_compute_processes = device.running_compute_processes().unwrap();
+            let compute_process_names: Vec<String> = running_compute_processes
+                .iter()
+                .map(|process| {
+                    nvml.sys_process_name(process.pid, 64)
+                        .unwrap_or_else(|_| String::from("Unknown"))
+                })
+                .collect();
+
+            let compute_process_data_vec: Vec<ProcessData> = running_compute_processes
+                .iter()
+                .zip(compute_process_names)
+                .map(|(process_info, process_name)| ProcessData {
+                    process_info: process_info.clone(),
+                    process_kind: ProcessKind::Compute,
+                    process_name,
+                })
+                .collect();
+
+            let processes = [graphics_process_data_vec, compute_process_data_vec].concat();
+
+            let num_fans = device.num_fans().unwrap();
+            let mut fan_speeds = Vec::new();
+            for fan_idx in 0..num_fans {
+                fan_speeds.push(device.fan_speed(fan_idx).unwrap());
+            }
 
             let device_state = DeviceState {
                 name: device.name().unwrap(),
@@ -51,7 +79,8 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
                 },
                 temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
                 mem_info: device.memory_info().unwrap(),
-                processes: process_data_vec,
+                fan_speeds,
+                processes,
             };
             tx.send(device_state).unwrap();
 
@@ -103,6 +132,7 @@ struct DeviceState {
     cuda_driver_version: CudaDriverVersion,
     temperature: u32,
     mem_info: MemoryInfo,
+    fan_speeds: Vec<u32>,
     processes: Vec<ProcessData>,
 }
 
@@ -123,8 +153,15 @@ impl MyApp {
 }
 
 #[derive(Debug, Clone)]
+enum ProcessKind {
+    Compute,
+    Graphics,
+}
+
+#[derive(Debug, Clone)]
 struct ProcessData {
     process_info: ProcessInfo,
+    process_kind: ProcessKind,
     process_name: String,
 }
 
@@ -212,9 +249,11 @@ impl ProcessTable {
                             );
                         });
 
-                        // TODO(Thomas): Figure out how to know the process type (does that mean Graphics vs Compute)???
                         row.col(|ui| {
-                            ui.label("Graphics");
+                            match &self.processes.get(row_index).unwrap().process_kind {
+                                ProcessKind::Compute => ui.label("Compute"),
+                                ProcessKind::Graphics => ui.label("Graphics"),
+                            };
                         });
 
                         row.col(|ui| {
@@ -222,20 +261,18 @@ impl ProcessTable {
                         });
 
                         row.col(|ui| {
-                            ui.label(format!(
-                                "{} MB",
-                                match self
-                                    .processes
-                                    .get(row_index)
-                                    .unwrap()
-                                    .process_info
-                                    .used_gpu_memory
-                                {
-                                    UsedGpuMemory::Used(val) => val / 1_000_000,
-                                    // TODO(Thomas): Returning 0 is not good I think
-                                    UsedGpuMemory::Unavailable => 0,
-                                }
-                            ));
+                            let mem_str = match self
+                                .processes
+                                .get(row_index)
+                                .unwrap()
+                                .process_info
+                                .used_gpu_memory
+                            {
+                                UsedGpuMemory::Used(val) => &format!("{} MiB", (val / 1_000_000)),
+                                UsedGpuMemory::Unavailable => "Unavailable",
+                            };
+
+                            ui.label(mem_str);
                         });
                     })
                 }
@@ -258,20 +295,23 @@ impl eframe::App for MyApp {
                     ui.label(format!("Driver version: {}", device.driver_version));
                     ui.label(format!("CUDA version: {}", device.cuda_driver_version));
                 });
+
                 ui.add_space(10.0);
-                ui.label(format!("temperature: {}°C", device.temperature));
-                ui.label(format!(
-                    "memory free: {} MB",
-                    device.mem_info.free / 1_000_000
-                ));
-                ui.label(format!(
-                    "memory total: {} MB",
-                    device.mem_info.total / 1_000_000
-                ));
-                ui.label(format!(
-                    "memory used: {} MB",
-                    device.mem_info.used / 1_000_000
-                ));
+
+                ui.horizontal(|ui| {
+                    ui.strong(format!("Temp: {}°C", device.temperature));
+                    ui.strong(format!(
+                        "Memory usage {} MiB / {} MiB",
+                        device.mem_info.used / 1_000_000,
+                        device.mem_info.total / 1_000_000
+                    ));
+                    for fan in &device.fan_speeds {
+                        ui.strong(format!("Fan speed: {}%", fan));
+                    }
+                });
+
+                ui.add_space(10.0);
+
                 self.process_table.table_ui(ui);
             } else {
                 ui.label("Waiting for data...");
