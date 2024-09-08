@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 nvml-wrapper = "0.10.0"
 eframe = "0.28.1"
+egui_extras = "0.28.1"
 
 env_logger = { version = "0.10", default-features = false, features = [
     "auto-color",

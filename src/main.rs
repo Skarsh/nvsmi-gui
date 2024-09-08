@@ -1,55 +1,67 @@
-use eframe::egui;
-use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
-use nvml_wrapper::high_level::Event::*;
-use nvml_wrapper::struct_wrappers::device::MemoryInfo;
-use nvml_wrapper::{error::NvmlError, high_level::EventLoopProvider, Nvml};
+use std::fmt::Display;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
 
-fn event_loop_thread(tx: Sender<DeviceState>) {
+use eframe::egui;
+use egui_extras::{Column, TableBuilder};
+
+use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
+use nvml_wrapper::enums::device::UsedGpuMemory;
+use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo};
+use nvml_wrapper::Nvml;
+
+// TODO(Thomas): Graceful shutdown
+fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
     let nvml = Nvml::init().unwrap();
     let device = nvml.device_by_index(0).unwrap();
-    let mut event_loop = nvml.create_event_loop(vec![&device]).unwrap();
 
-    event_loop.run_forever(|event, state| match event {
-        // If there were no erors extract the event
-        Ok(event) => match event {
-            ClockChange(device) => {
-                if let Ok(uuid) = device.uuid() {
-                    println!("ClockChange event for device with UUID {:?}", uuid);
-                    let device_state = DeviceState {
-                        name: device.name().unwrap(),
-                        temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
-                        mem_info: device.memory_info().unwrap(),
-                    };
-                    tx.send(device_state).unwrap();
-                } else {
-                    // Your error handling strategy here...
-                }
-            }
-            PowerStateChange(device) => {
-                if let Ok(uuid) = device.uuid() {
-                    println!("PowerStateChange event for device with UUID {:?}", uuid);
-                }
-            }
-            _ => println!("A different event occured: {:?}", event),
-        },
-        // If there was an error, handle it
-        Err(e) => match e {
-            // If the error is `Unknown`, continue looping and hope for the best.
-            NvmlError::Unknown => {}
+    let mut next_time = Instant::now() + poll_interval;
 
-            // The other errors that can occur are almost guaranteed to mean that
-            // further looping will never be successful (`GpuLost` and `Uninitilized`), so we stop
-            // looping
-            _ => state.interrupt(),
-        },
-    });
-}
+    loop {
+        let now = Instant::now();
+        if now >= next_time {
+            // Query device
+            let cuda_driver_version = nvml.sys_cuda_driver_version().unwrap();
+            let running_graphics_processes = device.running_graphics_processes().unwrap();
 
-struct DeviceState {
-    name: String,
-    temperature: u32,
-    mem_info: MemoryInfo,
+            let process_names: Vec<String> = running_graphics_processes
+                .iter()
+                .map(|process| {
+                    nvml.sys_process_name(process.pid, 64)
+                        .unwrap_or_else(|_| String::from("Unknown"))
+                })
+                .collect();
+
+            let process_data_vec = running_graphics_processes
+                .iter()
+                .zip(process_names)
+                .map(|(process_info, process_name)| ProcessData {
+                    process_info: process_info.clone(),
+                    process_name,
+                })
+                .collect();
+
+            let device_state = DeviceState {
+                name: device.name().unwrap(),
+                driver_version: nvml.sys_driver_version().unwrap(),
+                cuda_driver_version: CudaDriverVersion {
+                    major: nvml_wrapper::cuda_driver_version_major(cuda_driver_version),
+                    minor: nvml_wrapper::cuda_driver_version_minor(cuda_driver_version),
+                },
+                temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
+                mem_info: device.memory_info().unwrap(),
+                processes: process_data_vec,
+            };
+            tx.send(device_state).unwrap();
+
+            next_time += poll_interval;
+        }
+
+        // Calculate how long to sleep
+        let sleep_duration = next_time - now;
+        thread::sleep(sleep_duration);
+    }
 }
 
 fn main() -> eframe::Result {
@@ -58,23 +70,46 @@ fn main() -> eframe::Result {
     let (tx, rx) = channel::<DeviceState>();
 
     std::thread::spawn(move || {
-        event_loop_thread(tx);
+        device_polling_thread(tx, Duration::from_millis(100));
     });
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([320.0, 240.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "nvmsi-gui",
+        "nvsmi-gui",
         options,
         Box::new(|_cc| Ok(Box::new(MyApp::new(rx)))),
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CudaDriverVersion {
+    major: i32,
+    minor: i32,
+}
+
+impl Display for CudaDriverVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeviceState {
+    name: String,
+    driver_version: String,
+    cuda_driver_version: CudaDriverVersion,
+    temperature: u32,
+    mem_info: MemoryInfo,
+    processes: Vec<ProcessData>,
+}
+
 struct MyApp {
     rx: Receiver<DeviceState>,
     current_state: Option<DeviceState>,
+    process_table: ProcessTable,
 }
 
 impl MyApp {
@@ -82,7 +117,129 @@ impl MyApp {
         Self {
             rx,
             current_state: None,
+            process_table: ProcessTable::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProcessData {
+    process_info: ProcessInfo,
+    process_name: String,
+}
+
+#[derive(Debug)]
+struct ProcessTable {
+    striped: bool,
+    resizable: bool,
+    clickable: bool,
+    reversed: bool,
+    processes: Vec<ProcessData>,
+}
+
+impl Default for ProcessTable {
+    fn default() -> Self {
+        Self {
+            striped: true,
+            resizable: true,
+            clickable: true,
+            reversed: false,
+            processes: Vec::new(),
+        }
+    }
+}
+
+impl ProcessTable {
+    fn table_ui(&mut self, ui: &mut egui::Ui) {
+        let mut table = TableBuilder::new(ui)
+            .striped(self.striped)
+            .resizable(self.resizable)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::auto())
+            .column(
+                Column::remainder()
+                    .at_least(40.0)
+                    .clip(true)
+                    .resizable(true),
+            )
+            .column(Column::auto())
+            .column(Column::remainder())
+            .column(Column::remainder());
+
+        if self.clickable {
+            table = table.sense(egui::Sense::click());
+        }
+
+        table
+            .header(20.0, |mut header| {
+                header.col(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong("Row");
+                        if ui.button(if self.reversed { "⬆" } else { "⬇" }).clicked() {
+                            self.reversed = !self.reversed;
+                        }
+                    });
+                });
+                header.col(|ui| {
+                    ui.strong("PID");
+                });
+                header.col(|ui| {
+                    ui.strong("Type");
+                });
+                header.col(|ui| {
+                    ui.strong("Process name");
+                });
+                header.col(|ui| {
+                    ui.strong("GPU Memory Usage");
+                });
+            })
+            .body(|mut body| {
+                for row_index in 0..self.processes.len() {
+                    let row_height = 30.0;
+                    body.row(row_height, |mut row| {
+                        row.col(|ui| {
+                            ui.label(row_index.to_string());
+                        });
+
+                        row.col(|ui| {
+                            ui.label(
+                                self.processes
+                                    .get(row_index)
+                                    .unwrap()
+                                    .process_info
+                                    .pid
+                                    .to_string(),
+                            );
+                        });
+
+                        // TODO(Thomas): Figure out how to know the process type (does that mean Graphics vs Compute)???
+                        row.col(|ui| {
+                            ui.label("Graphics");
+                        });
+
+                        row.col(|ui| {
+                            ui.label(&self.processes.get(row_index).unwrap().process_name);
+                        });
+
+                        row.col(|ui| {
+                            ui.label(format!(
+                                "{} MB",
+                                match self
+                                    .processes
+                                    .get(row_index)
+                                    .unwrap()
+                                    .process_info
+                                    .used_gpu_memory
+                                {
+                                    UsedGpuMemory::Used(val) => val / 1_000_000,
+                                    // TODO(Thomas): Returning 0 is not good I think
+                                    UsedGpuMemory::Unavailable => 0,
+                                }
+                            ));
+                        });
+                    })
+                }
+            });
     }
 }
 
@@ -91,13 +248,17 @@ impl eframe::App for MyApp {
         // Check for new values from the receiver
         if let Ok(value) = self.rx.try_recv() {
             self.current_state = Some(value);
+            self.process_table.processes = self.current_state.as_ref().unwrap().processes.clone();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("nvsmi-gui");
-
-            if let Some(device) = &self.current_state {
-                ui.label(format!("name: {}", device.name));
+            if let Some(device) = &mut self.current_state {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Device: {}", device.name));
+                    ui.label(format!("Driver version: {}", device.driver_version));
+                    ui.label(format!("CUDA version: {}", device.cuda_driver_version));
+                });
+                ui.add_space(10.0);
                 ui.label(format!("temperature: {}°C", device.temperature));
                 ui.label(format!(
                     "memory free: {} MB",
@@ -111,6 +272,7 @@ impl eframe::App for MyApp {
                     "memory used: {} MB",
                     device.mem_info.used / 1_000_000
                 ));
+                self.process_table.table_ui(ui);
             } else {
                 ui.label("Waiting for data...");
             }
