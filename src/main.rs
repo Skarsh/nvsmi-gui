@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,11 @@ use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo};
 use nvml_wrapper::Nvml;
 
 // TODO(Thomas): Graceful shutdown
-fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
+fn device_polling_thread(
+    tx: Sender<DeviceState>,
+    app_rx: Receiver<AppCommand>,
+    poll_interval: Duration,
+) {
     let nvml = Nvml::init().unwrap();
     let device = nvml.device_by_index(0).unwrap();
 
@@ -20,6 +24,9 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
 
     loop {
         let now = Instant::now();
+        if app_rx.try_recv().is_ok() {
+            break;
+        };
         if now >= next_time {
             // Query device
             let cuda_driver_version = nvml.sys_cuda_driver_version().unwrap();
@@ -82,6 +89,7 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
                 fan_speeds,
                 processes,
             };
+
             tx.send(device_state).unwrap();
 
             next_time += poll_interval;
@@ -93,24 +101,34 @@ fn device_polling_thread(tx: Sender<DeviceState>, poll_interval: Duration) {
     }
 }
 
+enum AppCommand {
+    Exit,
+}
+
 fn main() -> eframe::Result {
     env_logger::init();
 
     let (tx, rx) = channel::<DeviceState>();
+    let (app_tx, app_rx) = sync_channel::<AppCommand>(1);
 
-    std::thread::spawn(move || {
-        device_polling_thread(tx, Duration::from_millis(100));
+    let device_polling_thread_handle = std::thread::spawn(move || {
+        device_polling_thread(tx, app_rx, Duration::from_millis(100));
     });
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 480.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(
         "nvsmi-gui",
         options,
-        Box::new(|_cc| Ok(Box::new(MyApp::new(rx)))),
+        Box::new(|_cc| Ok(Box::new(MyApp::new(app_tx, rx)))),
     )
+    .unwrap();
+
+    device_polling_thread_handle.join().unwrap();
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,14 +155,16 @@ struct DeviceState {
 }
 
 struct MyApp {
+    app_tx: SyncSender<AppCommand>,
     rx: Receiver<DeviceState>,
     current_state: Option<DeviceState>,
     process_table: ProcessTable,
 }
 
 impl MyApp {
-    fn new(rx: Receiver<DeviceState>) -> Self {
+    fn new(app_tx: SyncSender<AppCommand>, rx: Receiver<DeviceState>) -> Self {
         Self {
+            app_tx,
             rx,
             current_state: None,
             process_table: ProcessTable::default(),
@@ -170,7 +190,7 @@ struct ProcessTable {
     striped: bool,
     resizable: bool,
     clickable: bool,
-    reversed: bool,
+    process_memory_sorted_descending: bool,
     processes: Vec<ProcessData>,
 }
 
@@ -180,7 +200,7 @@ impl Default for ProcessTable {
             striped: true,
             resizable: true,
             clickable: true,
-            reversed: false,
+            process_memory_sorted_descending: false,
             processes: Vec::new(),
         }
     }
@@ -193,12 +213,6 @@ impl ProcessTable {
             .resizable(self.resizable)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto())
-            .column(
-                Column::remainder()
-                    .at_least(40.0)
-                    .clip(true)
-                    .resizable(true),
-            )
             .column(Column::auto())
             .column(Column::remainder())
             .column(Column::remainder());
@@ -210,14 +224,6 @@ impl ProcessTable {
         table
             .header(20.0, |mut header| {
                 header.col(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong("Row");
-                        if ui.button(if self.reversed { "⬆" } else { "⬇" }).clicked() {
-                            self.reversed = !self.reversed;
-                        }
-                    });
-                });
-                header.col(|ui| {
                     ui.strong("PID");
                 });
                 header.col(|ui| {
@@ -227,17 +233,26 @@ impl ProcessTable {
                     ui.strong("Process name");
                 });
                 header.col(|ui| {
-                    ui.strong("GPU Memory Usage");
+                    ui.horizontal(|ui| {
+                        ui.strong("GPU Memory Usage");
+                        if ui
+                            .button(if self.process_memory_sorted_descending {
+                                "⬆"
+                            } else {
+                                "⬇"
+                            })
+                            .clicked()
+                        {
+                            self.process_memory_sorted_descending =
+                                !self.process_memory_sorted_descending
+                        }
+                    });
                 });
             })
             .body(|mut body| {
                 for row_index in 0..self.processes.len() {
                     let row_height = 30.0;
                     body.row(row_height, |mut row| {
-                        row.col(|ui| {
-                            ui.label(row_index.to_string());
-                        });
-
                         row.col(|ui| {
                             ui.label(
                                 self.processes
@@ -286,6 +301,35 @@ impl eframe::App for MyApp {
         if let Ok(value) = self.rx.try_recv() {
             self.current_state = Some(value);
             self.process_table.processes = self.current_state.as_ref().unwrap().processes.clone();
+
+            // Sort processes by memory usage if process_memory_sorted is true
+            if self.process_table.process_memory_sorted_descending {
+                self.process_table.processes.sort_by(|a, b| {
+                    let memory_a = match a.process_info.used_gpu_memory {
+                        UsedGpuMemory::Used(val) => val,
+                        UsedGpuMemory::Unavailable => 0,
+                    };
+                    let memory_b = match b.process_info.used_gpu_memory {
+                        UsedGpuMemory::Used(val) => val,
+                        UsedGpuMemory::Unavailable => 0,
+                    };
+
+                    memory_b.cmp(&memory_a)
+                })
+            } else {
+                self.process_table.processes.sort_by(|a, b| {
+                    let memory_a = match a.process_info.used_gpu_memory {
+                        UsedGpuMemory::Used(val) => val,
+                        UsedGpuMemory::Unavailable => 0,
+                    };
+                    let memory_b = match b.process_info.used_gpu_memory {
+                        UsedGpuMemory::Used(val) => val,
+                        UsedGpuMemory::Unavailable => 0,
+                    };
+
+                    memory_a.cmp(&memory_b)
+                })
+            }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -320,5 +364,9 @@ impl eframe::App for MyApp {
 
         // Request a repaint on the next frame
         ctx.request_repaint();
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.app_tx.send(AppCommand::Exit).unwrap();
+        }
     }
 }
