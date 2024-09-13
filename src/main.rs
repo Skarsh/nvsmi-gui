@@ -201,6 +201,7 @@ struct ProcessTable {
 enum SortKind {
     Pid,
     Memory,
+    ProcessName
 }
 
 impl Default for ProcessTable {
@@ -264,7 +265,31 @@ impl ProcessTable {
                     ui.strong("Type");
                 });
                 header.col(|ui| {
-                    ui.strong("Process name");
+                    //ui.strong("Process name");
+
+                    let rich_text = RichText::new("Proccess name").color(Color32::WHITE);
+                    let label = Label::new(rich_text);
+
+                    // Make the label interactive
+                    let response = ui.add(label.sense(egui::Sense::hover()));
+
+                    // Change the color if hovered
+                    if response.hovered() {
+                        response.clone().highlight();
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+
+                    // TODO(Thomas): Figure out why sometimes when sorting another column the
+                    // order is not ascending on first click.
+                    if response.clicked() {
+                        match self.last_sort_kind {
+                            SortKind::ProcessName => self.sort_descending = !self.sort_descending,
+                            _ => {
+                                self.set_sort_by_process_name();
+                                self.last_sort_kind = SortKind::ProcessName;
+                            }
+                        }
+                    }
                 });
                 header.col(|ui| {
                     ui.horizontal(|ui| {
@@ -355,6 +380,10 @@ impl ProcessTable {
 
     fn set_sort_by_pid(&mut self) {
         self.sort_fn = Box::new(|a, b| a.process_info.pid.cmp(&b.process_info.pid));
+    }
+
+    fn set_sort_by_process_name(&mut self) {
+        self.sort_fn = Box::new(|a, b| a.process_name.cmp(&b.process_name))
     }
 
     fn sort_processes(&mut self) {
