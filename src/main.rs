@@ -154,24 +154,6 @@ struct DeviceState {
     processes: Vec<ProcessData>,
 }
 
-struct MyApp {
-    app_tx: SyncSender<AppCommand>,
-    rx: Receiver<DeviceState>,
-    current_state: Option<DeviceState>,
-    process_table: ProcessTable,
-}
-
-impl MyApp {
-    fn new(app_tx: SyncSender<AppCommand>, rx: Receiver<DeviceState>) -> Self {
-        Self {
-            app_tx,
-            rx,
-            current_state: None,
-            process_table: ProcessTable::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ProcessKind {
     Compute,
@@ -335,6 +317,31 @@ impl ProcessTable {
     }
 }
 
+enum Tab {
+    Devices,
+    Processes,
+}
+
+struct MyApp {
+    app_tx: SyncSender<AppCommand>,
+    rx: Receiver<DeviceState>,
+    current_state: Option<DeviceState>,
+    process_table: ProcessTable,
+    current_tab: Tab,
+}
+
+impl MyApp {
+    fn new(app_tx: SyncSender<AppCommand>, rx: Receiver<DeviceState>) -> Self {
+        Self {
+            app_tx,
+            rx,
+            current_state: None,
+            process_table: ProcessTable::default(),
+            current_tab: Tab::Devices,
+        }
+    }
+}
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check for new values from the receiver
@@ -345,31 +352,49 @@ impl eframe::App for MyApp {
             self.process_table.sort_processes();
         }
 
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(matches!(self.current_tab, Tab::Devices), "Device(s)").clicked() {
+                    self.current_tab = Tab::Devices;
+                }
+                if ui.selectable_label(matches!(self.current_tab, Tab::Processes), "Processes").clicked() {
+                    self.current_tab = Tab::Processes;
+                }
+            });
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(device) = &mut self.current_state {
-                ui.horizontal(|ui| {
-                    ui.label(format!("Device: {}", device.name));
-                    ui.label(format!("Driver version: {}", device.driver_version));
-                    ui.label(format!("CUDA version: {}", device.cuda_driver_version));
-                });
-
-                ui.add_space(10.0);
-
-                ui.horizontal(|ui| {
-                    ui.strong(format!("Temp: {}°C", device.temperature));
-                    ui.strong(format!(
-                        "Memory usage {} MiB / {} MiB",
-                        device.mem_info.used / 1_000_000,
-                        device.mem_info.total / 1_000_000
-                    ));
-                    for fan in &device.fan_speeds {
-                        ui.strong(format!("Fan speed: {}%", fan));
+                match self.current_tab {
+                    Tab::Devices => {
+                        ui.heading("Device Information");
+                        ui.add_space(10.0);
+                        
+                        ui.label(format!("Device: {}", device.name));
+                        ui.label(format!("Driver version: {}", device.driver_version));
+                        ui.label(format!("CUDA version: {}", device.cuda_driver_version));
+                        
+                        ui.add_space(10.0);
+                        
+                        ui.label(format!("Temperature: {}°C", device.temperature));
+                        ui.label(format!(
+                            "Memory usage: {} MiB / {} MiB",
+                            device.mem_info.used / 1_000_000,
+                            device.mem_info.total / 1_000_000
+                        ));
+                        
+                        for (i, fan) in device.fan_speeds.iter().enumerate() {
+                            ui.label(format!("Fan {} speed: {}%", i + 1, fan));
+                        }
+                        
+                        // Add more device-specific information here
                     }
-                });
-
-                ui.add_space(10.0);
-
-                self.process_table.table_ui(ui);
+                    Tab::Processes => {
+                        ui.heading("Process Information");
+                        ui.add_space(10.0);
+                        self.process_table.table_ui(ui);
+                    }
+                }
             } else {
                 ui.label("Waiting for data...");
             }
