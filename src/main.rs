@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::fmt::Display;
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::thread;
@@ -173,10 +172,19 @@ impl MyApp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ProcessKind {
     Compute,
     Graphics,
+}
+
+impl Display for ProcessKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcessKind::Compute => write!(f, "Compute"),
+            ProcessKind::Graphics => write!(f, "Graphics"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -186,22 +194,21 @@ struct ProcessData {
     process_name: String,
 }
 
-type SortFn = dyn Fn(&ProcessData, &ProcessData) -> Ordering;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKind {
+    Pid,
+    Type,
+    ProcessName,
+    Memory,
+}
 
 struct ProcessTable {
     striped: bool,
     resizable: bool,
     clickable: bool,
     sort_descending: bool,
-    sort_fn: Box<SortFn>,
-    last_sort_kind: SortKind,
+    sort_kind: Option<SortKind>,
     processes: Vec<ProcessData>,
-}
-
-enum SortKind {
-    Pid,
-    Memory,
-    ProcessName
 }
 
 impl Default for ProcessTable {
@@ -210,9 +217,8 @@ impl Default for ProcessTable {
             striped: true,
             resizable: true,
             clickable: true,
-            sort_descending: false,
-            sort_fn: Box::new(|a, b| a.process_info.pid.cmp(&b.process_info.pid)),
-            last_sort_kind: SortKind::Pid,
+            sort_descending: true,
+            sort_kind: None,
             processes: Vec::new(),
         }
     }
@@ -236,165 +242,96 @@ impl ProcessTable {
 
         table
             .header(20.0, |mut header| {
-                header.col(|ui| {
-                    let rich_text = RichText::new("PID").color(Color32::WHITE);
-                    let label = Label::new(rich_text);
-
-                    // Make the label interactive
-                    let response = ui.add(label.sense(egui::Sense::hover()));
-
-                    // Change the color if hovered
-                    if response.hovered() {
-                        response.clone().highlight();
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-
-                    // TODO(Thomas): Figure out why sometimes when sorting another column the
-                    // order is not ascending on first click.
-                    if response.clicked() {
-                        match self.last_sort_kind {
-                            SortKind::Pid => self.sort_descending = !self.sort_descending,
-                            _ => {
-                                self.set_sort_by_pid();
-                                self.last_sort_kind = SortKind::Pid;
-                            }
-                        }
-                    }
-                });
-                header.col(|ui| {
-                    ui.strong("Type");
-                });
-                header.col(|ui| {
-                    //ui.strong("Process name");
-
-                    let rich_text = RichText::new("Proccess name").color(Color32::WHITE);
-                    let label = Label::new(rich_text);
-
-                    // Make the label interactive
-                    let response = ui.add(label.sense(egui::Sense::hover()));
-
-                    // Change the color if hovered
-                    if response.hovered() {
-                        response.clone().highlight();
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-
-                    // TODO(Thomas): Figure out why sometimes when sorting another column the
-                    // order is not ascending on first click.
-                    if response.clicked() {
-                        match self.last_sort_kind {
-                            SortKind::ProcessName => self.sort_descending = !self.sort_descending,
-                            _ => {
-                                self.set_sort_by_process_name();
-                                self.last_sort_kind = SortKind::ProcessName;
-                            }
-                        }
-                    }
-                });
-                header.col(|ui| {
-                    ui.horizontal(|ui| {
-                        let rich_text = RichText::new("GPU Memory Usage").color(Color32::WHITE);
-                        let label = Label::new(rich_text);
-
-                        // Make the label interactive
-                        let response = ui.add(label.sense(egui::Sense::hover()));
-
-                        // Change the color if hovered
-                        if response.hovered() {
-                            response.clone().highlight();
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-
-                        // TODO(Thomas): Figure out why sometimes when sorting another column the
-                        // order is not ascending on first click.
-                        if response.clicked() {
-                            match self.last_sort_kind {
-                                SortKind::Memory => self.sort_descending = !self.sort_descending,
-                                _ => {
-                                    self.set_sort_by_gpu_memory();
-                                    self.last_sort_kind = SortKind::Memory;
-                                }
-                            }
-                        }
-                    });
-                });
+                self.create_sortable_header(&mut header, "PID", SortKind::Pid);
+                self.create_sortable_header(&mut header, "Type", SortKind::Type);
+                self.create_sortable_header(&mut header, "Process name", SortKind::ProcessName);
+                self.create_sortable_header(&mut header, "GPU Memory Usage", SortKind::Memory);
             })
             .body(|mut body| {
-                for row_index in 0..self.processes.len() {
+                for process in &self.processes {
                     let row_height = 30.0;
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
-                            ui.label(
-                                self.processes
-                                    .get(row_index)
-                                    .unwrap()
-                                    .process_info
-                                    .pid
-                                    .to_string(),
-                            );
+                            ui.label(process.process_info.pid.to_string());
                         });
-
                         row.col(|ui| {
-                            match &self.processes.get(row_index).unwrap().process_kind {
-                                ProcessKind::Compute => ui.label("Compute"),
-                                ProcessKind::Graphics => ui.label("Graphics"),
+                            ui.label(process.process_kind.to_string());
+                        });
+                        row.col(|ui| {
+                            ui.label(&process.process_name);
+                        });
+                        row.col(|ui| {
+                            let mem_str = match process.process_info.used_gpu_memory {
+                                UsedGpuMemory::Used(val) => format!("{} MiB", (val / 1_000_000)),
+                                UsedGpuMemory::Unavailable => String::from("Unavailable"),
                             };
-                        });
-
-                        row.col(|ui| {
-                            ui.label(&self.processes.get(row_index).unwrap().process_name);
-                        });
-
-                        row.col(|ui| {
-                            let mem_str = match self
-                                .processes
-                                .get(row_index)
-                                .unwrap()
-                                .process_info
-                                .used_gpu_memory
-                            {
-                                UsedGpuMemory::Used(val) => &format!("{} MiB", (val / 1_000_000)),
-                                UsedGpuMemory::Unavailable => "Unavailable",
-                            };
-
                             ui.label(mem_str);
                         });
-                    })
+                    });
                 }
             });
     }
 
-    fn set_sort_by_gpu_memory(&mut self) {
-        self.sort_fn = Box::new(|a, b| {
-            let memory_a = match a.process_info.used_gpu_memory {
-                UsedGpuMemory::Used(val) => val,
-                UsedGpuMemory::Unavailable => 0,
-            };
-            let memory_b = match b.process_info.used_gpu_memory {
-                UsedGpuMemory::Used(val) => val,
-                UsedGpuMemory::Unavailable => 0,
-            };
-            memory_a.cmp(&memory_b)
+    fn create_sortable_header(
+        &mut self,
+        header: &mut egui_extras::TableRow,
+        label: &str,
+        sort_kind: SortKind,
+    ) {
+        header.col(|ui| {
+            let rich_text = RichText::new(label).color(Color32::WHITE);
+            let label = Label::new(rich_text);
+            let response = ui.add(label.sense(egui::Sense::hover()));
+
+            if response.hovered() {
+                response.clone().highlight();
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            if response.clicked() {
+                match self.sort_kind {
+                    Some(current_sort) if current_sort == sort_kind => {
+                        // If clicking on the same column, toggle the sort order
+                        self.sort_descending = !self.sort_descending;
+                    }
+                    _ => {
+                        // If clicking on a new column or sorting for the first time,
+                        // set to descending order
+                        self.sort_kind = Some(sort_kind);
+                        self.sort_descending = true;
+                    }
+                }
+                self.sort_processes();
+            }
         });
     }
 
-    fn set_sort_by_pid(&mut self) {
-        self.sort_fn = Box::new(|a, b| a.process_info.pid.cmp(&b.process_info.pid));
-    }
-
-    fn set_sort_by_process_name(&mut self) {
-        self.sort_fn = Box::new(|a, b| a.process_name.cmp(&b.process_name))
-    }
-
     fn sort_processes(&mut self) {
-        let descending = self.sort_descending;
-        self.processes.sort_by(|a, b| {
-            if descending {
-                (self.sort_fn)(b, a)
-            } else {
-                (self.sort_fn)(a, b)
-            }
-        })
+        if let Some(sort_kind) = self.sort_kind {
+            self.processes.sort_by(|a, b| {
+                let cmp = match sort_kind {
+                    SortKind::Pid => a.process_info.pid.cmp(&b.process_info.pid),
+                    SortKind::Type => a.process_kind.cmp(&b.process_kind),
+                    SortKind::ProcessName => a.process_name.cmp(&b.process_name),
+                    SortKind::Memory => {
+                        let memory_a = match a.process_info.used_gpu_memory {
+                            UsedGpuMemory::Used(val) => val,
+                            UsedGpuMemory::Unavailable => 0,
+                        };
+                        let memory_b = match b.process_info.used_gpu_memory {
+                            UsedGpuMemory::Used(val) => val,
+                            UsedGpuMemory::Unavailable => 0,
+                        };
+                        memory_a.cmp(&memory_b)
+                    }
+                };
+                if self.sort_descending {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
+            });
+        }
     }
 }
 
