@@ -69,6 +69,17 @@ impl Default for ProcessTable {
     }
 }
 
+pub fn get_process_name(full_proccess_name: &str) -> &str {
+    let parts: Vec<&str> = full_proccess_name.split_whitespace().collect();
+
+    if let Some(executable_path) = parts.first() {
+        let splits: Vec<&str> = executable_path.split("/").collect();
+        splits.last().unwrap()
+    } else {
+        ""
+    }
+}
+
 impl ProcessTable {
     pub fn table_ui(&mut self, ui: &mut egui::Ui) {
         let mut table = TableBuilder::new(ui)
@@ -200,6 +211,26 @@ impl ProcessTable {
                     cmp
                 }
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_process_name() {
+        {
+            let full_process_name = "/home/MyUser/dev/rust/alacritty/target/release/alacritty";
+            let process_name = get_process_name(full_process_name);
+            assert_eq!(process_name, "alacritty");
+        }
+        {
+            let full_process_name =
+                "/usr/share/discord/Discord --type=gpu-process --crashpad-handle";
+            let process_name = get_process_name(full_process_name);
+            assert_eq!(process_name, "Discord");
         }
     }
 }

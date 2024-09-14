@@ -32,7 +32,9 @@ fn poll_device() -> SystemState {
         .map(|(process_info, process_name)| ProcessData {
             process_info: process_info.clone(),
             process_kind: ProcessKind::Graphics,
-            process_name,
+            process_name: process::get_process_name(&process_name)
+                .to_string()
+                .to_lowercase(),
         })
         .collect();
 
@@ -51,7 +53,7 @@ fn poll_device() -> SystemState {
         .map(|(process_info, process_name)| ProcessData {
             process_info: process_info.clone(),
             process_kind: ProcessKind::Compute,
-            process_name,
+            process_name: process::get_process_name(&process_name).to_string(),
         })
         .collect();
 
