@@ -1,7 +1,4 @@
 use std::fmt::Display;
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Label, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -11,109 +8,76 @@ use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo};
 use nvml_wrapper::Nvml;
 
-// TODO(Thomas): Graceful shutdown
-fn device_polling_thread(
-    tx: Sender<DeviceState>,
-    app_rx: Receiver<AppCommand>,
-    poll_interval: Duration,
-) {
-    let nvml = Nvml::init().unwrap();
-    let device = nvml.device_by_index(0).unwrap();
+use once_cell::sync::Lazy;
 
-    let mut next_time = Instant::now() + poll_interval;
+static NVML: Lazy<Nvml> = Lazy::new(|| Nvml::init().unwrap());
 
-    loop {
-        let now = Instant::now();
-        if app_rx.try_recv().is_ok() {
-            break;
-        };
-        if now >= next_time {
-            // Query device
-            let cuda_driver_version = nvml.sys_cuda_driver_version().unwrap();
-            let running_graphics_processes = device.running_graphics_processes().unwrap();
+fn poll_device() -> DeviceState {
+    let device = NVML.device_by_index(0).unwrap();
+    let cuda_driver_version = NVML.sys_cuda_driver_version().unwrap();
+    let running_graphics_processes = device.running_graphics_processes().unwrap();
 
-            let graphics_process_names: Vec<String> = running_graphics_processes
-                .iter()
-                .map(|process| {
-                    nvml.sys_process_name(process.pid, 64)
-                        .unwrap_or_else(|_| String::from("Unknown"))
-                })
-                .collect();
+    let graphics_process_names: Vec<String> = running_graphics_processes
+        .iter()
+        .map(|process| {
+            NVML.sys_process_name(process.pid, 64)
+                .unwrap_or_else(|_| String::from("Unknown"))
+        })
+        .collect();
 
-            let graphics_process_data_vec: Vec<ProcessData> = running_graphics_processes
-                .iter()
-                .zip(graphics_process_names)
-                .map(|(process_info, process_name)| ProcessData {
-                    process_info: process_info.clone(),
-                    process_kind: ProcessKind::Graphics,
-                    process_name,
-                })
-                .collect();
+    let graphics_process_data_vec: Vec<ProcessData> = running_graphics_processes
+        .iter()
+        .zip(graphics_process_names)
+        .map(|(process_info, process_name)| ProcessData {
+            process_info: process_info.clone(),
+            process_kind: ProcessKind::Graphics,
+            process_name,
+        })
+        .collect();
 
-            let running_compute_processes = device.running_compute_processes().unwrap();
-            let compute_process_names: Vec<String> = running_compute_processes
-                .iter()
-                .map(|process| {
-                    nvml.sys_process_name(process.pid, 64)
-                        .unwrap_or_else(|_| String::from("Unknown"))
-                })
-                .collect();
+    let running_compute_processes = device.running_compute_processes().unwrap();
+    let compute_process_names: Vec<String> = running_compute_processes
+        .iter()
+        .map(|process| {
+            NVML.sys_process_name(process.pid, 64)
+                .unwrap_or_else(|_| String::from("Unknown"))
+        })
+        .collect();
 
-            let compute_process_data_vec: Vec<ProcessData> = running_compute_processes
-                .iter()
-                .zip(compute_process_names)
-                .map(|(process_info, process_name)| ProcessData {
-                    process_info: process_info.clone(),
-                    process_kind: ProcessKind::Compute,
-                    process_name,
-                })
-                .collect();
+    let compute_process_data_vec: Vec<ProcessData> = running_compute_processes
+        .iter()
+        .zip(compute_process_names)
+        .map(|(process_info, process_name)| ProcessData {
+            process_info: process_info.clone(),
+            process_kind: ProcessKind::Compute,
+            process_name,
+        })
+        .collect();
 
-            let processes = [graphics_process_data_vec, compute_process_data_vec].concat();
+    let processes = [graphics_process_data_vec, compute_process_data_vec].concat();
 
-            let num_fans = device.num_fans().unwrap();
-            let mut fan_speeds = Vec::new();
-            for fan_idx in 0..num_fans {
-                fan_speeds.push(device.fan_speed(fan_idx).unwrap());
-            }
-
-            let device_state = DeviceState {
-                name: device.name().unwrap(),
-                driver_version: nvml.sys_driver_version().unwrap(),
-                cuda_driver_version: CudaDriverVersion {
-                    major: nvml_wrapper::cuda_driver_version_major(cuda_driver_version),
-                    minor: nvml_wrapper::cuda_driver_version_minor(cuda_driver_version),
-                },
-                temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
-                mem_info: device.memory_info().unwrap(),
-                fan_speeds,
-                processes,
-            };
-
-            tx.send(device_state).unwrap();
-
-            next_time += poll_interval;
-        }
-
-        // Calculate how long to sleep
-        let sleep_duration = next_time - now;
-        thread::sleep(sleep_duration);
+    let num_fans = device.num_fans().unwrap();
+    let mut fan_speeds = Vec::new();
+    for fan_idx in 0..num_fans {
+        fan_speeds.push(device.fan_speed(fan_idx).unwrap());
     }
-}
 
-enum AppCommand {
-    Exit,
+    DeviceState {
+        name: device.name().unwrap(),
+        driver_version: NVML.sys_driver_version().unwrap(),
+        cuda_driver_version: CudaDriverVersion {
+            major: nvml_wrapper::cuda_driver_version_major(cuda_driver_version),
+            minor: nvml_wrapper::cuda_driver_version_minor(cuda_driver_version),
+        },
+        temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
+        mem_info: device.memory_info().unwrap(),
+        fan_speeds,
+        processes,
+    }
 }
 
 fn main() -> eframe::Result {
     env_logger::init();
-
-    let (tx, rx) = channel::<DeviceState>();
-    let (app_tx, app_rx) = sync_channel::<AppCommand>(1);
-
-    let device_polling_thread_handle = std::thread::spawn(move || {
-        device_polling_thread(tx, app_rx, Duration::from_millis(16));
-    });
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
@@ -122,11 +86,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "nvsmi-gui",
         options,
-        Box::new(|_cc| Ok(Box::new(MyApp::new(app_tx, rx)))),
+        Box::new(|_cc| Ok(Box::new(MyApp::new()))),
     )
     .unwrap();
-
-    device_polling_thread_handle.join().unwrap();
 
     Ok(())
 }
@@ -323,18 +285,14 @@ enum Tab {
 }
 
 struct MyApp {
-    app_tx: SyncSender<AppCommand>,
-    rx: Receiver<DeviceState>,
     current_state: Option<DeviceState>,
     process_table: ProcessTable,
     current_tab: Tab,
 }
 
 impl MyApp {
-    fn new(app_tx: SyncSender<AppCommand>, rx: Receiver<DeviceState>) -> Self {
+    fn new() -> Self {
         Self {
-            app_tx,
-            rx,
             current_state: None,
             process_table: ProcessTable::default(),
             current_tab: Tab::Devices,
@@ -345,19 +303,23 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check for new values from the receiver
-        if let Ok(value) = self.rx.try_recv() {
-            self.current_state = Some(value);
-            self.process_table.processes = self.current_state.as_ref().unwrap().processes.clone();
-            // Sort processes
-            self.process_table.sort_processes();
-        }
+        let device_state = poll_device();
+        self.current_state = Some(device_state);
+        self.process_table.processes = self.current_state.as_ref().unwrap().processes.clone();
+        self.process_table.sort_processes();
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.selectable_label(matches!(self.current_tab, Tab::Devices), "Device(s)").clicked() {
+                if ui
+                    .selectable_label(matches!(self.current_tab, Tab::Devices), "Device(s)")
+                    .clicked()
+                {
                     self.current_tab = Tab::Devices;
                 }
-                if ui.selectable_label(matches!(self.current_tab, Tab::Processes), "Processes").clicked() {
+                if ui
+                    .selectable_label(matches!(self.current_tab, Tab::Processes), "Processes")
+                    .clicked()
+                {
                     self.current_tab = Tab::Processes;
                 }
             });
@@ -369,24 +331,24 @@ impl eframe::App for MyApp {
                     Tab::Devices => {
                         ui.heading("Device Information");
                         ui.add_space(10.0);
-                        
+
                         ui.label(format!("Device: {}", device.name));
                         ui.label(format!("Driver version: {}", device.driver_version));
                         ui.label(format!("CUDA version: {}", device.cuda_driver_version));
-                        
+
                         ui.add_space(10.0);
-                        
+
                         ui.label(format!("Temperature: {}°C", device.temperature));
                         ui.label(format!(
                             "Memory usage: {} MiB / {} MiB",
                             device.mem_info.used / 1_000_000,
                             device.mem_info.total / 1_000_000
                         ));
-                        
+
                         for (i, fan) in device.fan_speeds.iter().enumerate() {
                             ui.label(format!("Fan {} speed: {}%", i + 1, fan));
                         }
-                        
+
                         // Add more device-specific information here
                     }
                     Tab::Processes => {
@@ -403,8 +365,7 @@ impl eframe::App for MyApp {
         // Request a repaint on the next frame
         ctx.request_repaint();
 
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.app_tx.send(AppCommand::Exit).unwrap();
-        }
+        // Do potential cleanup stuff here
+        if ctx.input(|i| i.viewport().close_requested()) {}
     }
 }
