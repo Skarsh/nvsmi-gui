@@ -112,7 +112,7 @@ fn main() -> eframe::Result {
     let (app_tx, app_rx) = sync_channel::<AppCommand>(1);
 
     let device_polling_thread_handle = std::thread::spawn(move || {
-        device_polling_thread(tx, app_rx, Duration::from_millis(100));
+        device_polling_thread(tx, app_rx, Duration::from_millis(16));
     });
 
     let options = eframe::NativeOptions {
