@@ -1,0 +1,1 @@
+- [] Freeze highlighted process in place, so that it doesn't jump around when sorting
