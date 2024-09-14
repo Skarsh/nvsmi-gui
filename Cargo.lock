@@ -684,6 +684,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "circular-buffer"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da987586004ae7c43b7df5e3f7693775068522e1086f8d9b2d74c778a0f43313"
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2016,6 +2022,7 @@ dependencies = [
 name = "nvsmi-gui"
 version = "0.1.0"
 dependencies = [
+ "circular-buffer",
  "eframe",
  "egui_extras",
  "egui_plot",
