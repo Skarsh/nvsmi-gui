@@ -1,7 +1,8 @@
 use std::fmt::Display;
 
-use eframe::egui::{self, Color32, Label, RichText};
+use eframe::egui::{self, Color32, Event, Label, RichText, Vec2};
 use egui_extras::{Column, TableBuilder};
+use egui_plot::{Legend, Line, PlotPoints};
 
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::enums::device::UsedGpuMemory;
@@ -153,6 +154,9 @@ struct ProcessTable {
     sort_descending: bool,
     sort_kind: Option<SortKind>,
     processes: Vec<ProcessData>,
+    show_plot_window: bool,
+    process_plot: ProcessPlot,
+    selection: std::collections::HashSet<usize>,
 }
 
 impl Default for ProcessTable {
@@ -164,6 +168,9 @@ impl Default for ProcessTable {
             sort_descending: true,
             sort_kind: None,
             processes: Vec::new(),
+            show_plot_window: false,
+            process_plot: ProcessPlot::default(),
+            selection: Default::default(),
         }
     }
 }
@@ -181,8 +188,9 @@ impl ProcessTable {
 
         if self.clickable {
             table = table.sense(egui::Sense::click());
-            table = table.sense(egui::Sense::hover());
         }
+
+        let mut rows_to_toggle: Vec<(usize, egui::Response)> = Vec::new();
 
         table
             .header(20.0, |mut header| {
@@ -195,6 +203,8 @@ impl ProcessTable {
                 for process in &self.processes {
                     let row_height = 30.0;
                     body.row(row_height, |mut row| {
+                        let row_index = row.index();
+                        row.set_selected(self.selection.contains(&row_index));
                         row.col(|ui| {
                             ui.label(process.process_info.pid.to_string());
                         });
@@ -211,9 +221,28 @@ impl ProcessTable {
                             };
                             ui.label(mem_str);
                         });
+                        let response = row.response();
+                        if response.clicked() {
+                            rows_to_toggle.push((row_index, response));
+                        }
                     });
                 }
             });
+
+        // Toggle row selection after the table has been drawn
+        for (row_index, response) in rows_to_toggle {
+            self.toggle_row_selection(row_index, &response);
+        }
+    }
+
+    fn toggle_row_selection(&mut self, row_index: usize, row_response: &egui::Response) {
+        if row_response.clicked() {
+            if self.selection.contains(&row_index) {
+                self.selection.remove(&row_index);
+            } else {
+                self.selection.insert(row_index);
+            }
+        }
     }
 
     fn create_sortable_header(
@@ -300,6 +329,95 @@ impl MyApp {
     }
 }
 
+struct ProcessPlot {
+    lock_x: bool,
+    lock_y: bool,
+    ctrl_to_zoom: bool,
+    shift_to_horizontal: bool,
+    zoom_speed: f32,
+    scroll_speed: f32,
+}
+
+impl Default for ProcessPlot {
+    fn default() -> Self {
+        Self {
+            lock_x: false,
+            lock_y: false,
+            ctrl_to_zoom: false,
+            shift_to_horizontal: false,
+            zoom_speed: 1.0,
+            scroll_speed: 1.0,
+        }
+    }
+}
+
+impl ProcessPlot {
+    fn process_plot_ui(&mut self, ui: &mut egui::Ui) {
+        let (scroll, pointer_down, modifiers) = ui.input(|i| {
+            let scroll = i.events.iter().find_map(|e| match e {
+                Event::MouseWheel {
+                    unit: _,
+                    delta,
+                    modifiers: _,
+                } => Some(*delta),
+                _ => None,
+            });
+            (scroll, i.pointer.primary_down(), i.modifiers)
+        });
+
+        ui.label("This example shows how to use raw input events to implement different plot controls than the ones egui provides by default, e.g., default to zooming instead of panning when the Ctrl key is not pressed, or controlling much it zooms with each mouse wheel step.");
+
+        egui_plot::Plot::new("plot")
+            .allow_zoom(false)
+            .allow_drag(false)
+            .allow_scroll(false)
+            .legend(Legend::default())
+            .show(ui, |plot_ui| {
+                if let Some(mut scroll) = scroll {
+                    if modifiers.ctrl == self.ctrl_to_zoom {
+                        scroll = Vec2::splat(scroll.x + scroll.y);
+                        let mut zoom_factor = Vec2::from([
+                            (scroll.x * self.zoom_speed / 10.0).exp(),
+                            (scroll.y * self.zoom_speed / 10.0).exp(),
+                        ]);
+                        if self.lock_x {
+                            zoom_factor.x = 1.0;
+                        }
+                        if self.lock_y {
+                            zoom_factor.y = 1.0;
+                        }
+                        plot_ui.zoom_bounds_around_hovered(zoom_factor);
+                    } else {
+                        if modifiers.shift == self.shift_to_horizontal {
+                            scroll = Vec2::new(scroll.y, scroll.x);
+                        }
+                        if self.lock_x {
+                            scroll.x = 0.0;
+                        }
+                        if self.lock_y {
+                            scroll.y = 0.0;
+                        }
+                        let delta_pos = self.scroll_speed * scroll;
+                        plot_ui.translate_bounds(delta_pos);
+                    }
+                }
+                if plot_ui.response().hovered() && pointer_down {
+                    let mut pointer_translate = -plot_ui.pointer_coordinate_drag_delta();
+                    if self.lock_x {
+                        pointer_translate.x = 0.0;
+                    }
+                    if self.lock_y {
+                        pointer_translate.y = 0.0;
+                    }
+                    plot_ui.translate_bounds(pointer_translate);
+                }
+
+                let sine_points = PlotPoints::from_explicit_callback(|x| x.sin(), .., 5000);
+                plot_ui.line(Line::new(sine_points).name("Sine"));
+            });
+    }
+}
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check for new values from the receiver
@@ -354,7 +472,14 @@ impl eframe::App for MyApp {
                     Tab::Processes => {
                         ui.heading("Process Information");
                         ui.add_space(10.0);
+
                         self.process_table.table_ui(ui);
+
+                        if self.process_table.show_plot_window {
+                            ui.add_space(10.0);
+                            ui.heading("Process Plot");
+                            self.process_table.process_plot.process_plot_ui(ui);
+                        }
                     }
                 }
             } else {
