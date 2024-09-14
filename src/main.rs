@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use circular_buffer::CircularBuffer;
+
 use eframe::egui::{self, Color32, Event, Label, RichText, Vec2};
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Legend, Line, PlotPoints};
@@ -13,7 +15,7 @@ use once_cell::sync::Lazy;
 
 static NVML: Lazy<Nvml> = Lazy::new(|| Nvml::init().unwrap());
 
-fn poll_device() -> DeviceState {
+fn poll_device() -> SystemState {
     let device = NVML.device_by_index(0).unwrap();
     let cuda_driver_version = NVML.sys_cuda_driver_version().unwrap();
     let running_graphics_processes = device.running_graphics_processes().unwrap();
@@ -56,6 +58,9 @@ fn poll_device() -> DeviceState {
         .collect();
 
     let processes = [graphics_process_data_vec, compute_process_data_vec].concat();
+    let process_state = ProcessState {
+        processes
+    };
 
     let num_fans = device.num_fans().unwrap();
     let mut fan_speeds = Vec::new();
@@ -63,7 +68,7 @@ fn poll_device() -> DeviceState {
         fan_speeds.push(device.fan_speed(fan_idx).unwrap());
     }
 
-    DeviceState {
+    let device_state = DeviceState {
         name: device.name().unwrap(),
         driver_version: NVML.sys_driver_version().unwrap(),
         cuda_driver_version: CudaDriverVersion {
@@ -73,8 +78,12 @@ fn poll_device() -> DeviceState {
         temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
         mem_info: device.memory_info().unwrap(),
         fan_speeds,
-        processes,
-    }
+    };
+
+    SystemState {
+        device_state,
+        process_state
+    } 
 }
 
 fn main() -> eframe::Result {
@@ -107,6 +116,12 @@ impl Display for CudaDriverVersion {
 }
 
 #[derive(Debug, Clone)]
+struct SystemState {
+    device_state: DeviceState,
+    process_state: ProcessState,
+}
+
+#[derive(Debug, Clone)]
 struct DeviceState {
     name: String,
     driver_version: String,
@@ -114,6 +129,15 @@ struct DeviceState {
     temperature: u32,
     mem_info: MemoryInfo,
     fan_speeds: Vec<u32>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct DeviceView { 
+    device_stats_plot: DeviceStatsPlot,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessState {
     processes: Vec<ProcessData>,
 }
 
@@ -147,6 +171,7 @@ enum SortKind {
     Memory,
 }
 
+#[derive(Debug, Clone)]
 struct ProcessTable {
     striped: bool,
     resizable: bool,
@@ -155,7 +180,6 @@ struct ProcessTable {
     sort_kind: Option<SortKind>,
     processes: Vec<ProcessData>,
     show_plot_window: bool,
-    process_plot: ProcessPlot,
     selection: std::collections::HashSet<usize>,
 }
 
@@ -169,7 +193,6 @@ impl Default for ProcessTable {
             sort_kind: None,
             processes: Vec::new(),
             show_plot_window: false,
-            process_plot: ProcessPlot::default(),
             selection: Default::default(),
         }
     }
@@ -233,6 +256,8 @@ impl ProcessTable {
         for (row_index, response) in rows_to_toggle {
             self.toggle_row_selection(row_index, &response);
         }
+
+        self.show_plot_window = !self.selection.is_empty();
     }
 
     fn toggle_row_selection(&mut self, row_index: usize, row_response: &egui::Response) {
@@ -308,13 +333,15 @@ impl ProcessTable {
     }
 }
 
+#[derive(Debug, Clone)]
 enum Tab {
     Devices,
     Processes,
 }
 
 struct MyApp {
-    current_state: Option<DeviceState>,
+    current_state: Option<SystemState>,
+    device_view: DeviceView,
     process_table: ProcessTable,
     current_tab: Tab,
 }
@@ -323,22 +350,26 @@ impl MyApp {
     fn new() -> Self {
         Self {
             current_state: None,
+            device_view: DeviceView::default(),
             process_table: ProcessTable::default(),
             current_tab: Tab::Devices,
         }
     }
 }
 
-struct ProcessPlot {
+#[derive(Debug, Clone)]
+struct DeviceStatsPlot {
     lock_x: bool,
     lock_y: bool,
     ctrl_to_zoom: bool,
     shift_to_horizontal: bool,
     zoom_speed: f32,
     scroll_speed: f32,
+    temperature_vals: CircularBuffer<10_000, u32>,
+    memory_usage_vals: CircularBuffer<10_000, u64>,
 }
 
-impl Default for ProcessPlot {
+impl Default for DeviceStatsPlot {
     fn default() -> Self {
         Self {
             lock_x: false,
@@ -347,12 +378,14 @@ impl Default for ProcessPlot {
             shift_to_horizontal: false,
             zoom_speed: 1.0,
             scroll_speed: 1.0,
+            temperature_vals: CircularBuffer::new(),
+            memory_usage_vals: CircularBuffer::new(),
         }
     }
 }
 
-impl ProcessPlot {
-    fn process_plot_ui(&mut self, ui: &mut egui::Ui) {
+impl DeviceStatsPlot {
+    fn plot_ui(&mut self, ui: &mut egui::Ui) {
         let (scroll, pointer_down, modifiers) = ui.input(|i| {
             let scroll = i.events.iter().find_map(|e| match e {
                 Event::MouseWheel {
@@ -412,8 +445,24 @@ impl ProcessPlot {
                     plot_ui.translate_bounds(pointer_translate);
                 }
 
-                let sine_points = PlotPoints::from_explicit_callback(|x| x.sin(), .., 5000);
-                plot_ui.line(Line::new(sine_points).name("Sine"));
+                // TODO(Thomas) This is wrong since the time is needed as well
+                let temperature_points: PlotPoints = self
+                    .temperature_vals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &temp)| [i as f64, temp as f64])
+                    .collect();
+
+                let memory_usage_points: PlotPoints = self
+                    .memory_usage_vals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &mem_usage)| [i as f64, mem_usage as f64])
+                    .collect();
+
+                // Plot the temperature line
+                plot_ui.line(Line::new(temperature_points).name("GPU Temperature"));
+                plot_ui.line(Line::new(memory_usage_points).name("Memory Usage"));
             });
     }
 }
@@ -421,9 +470,11 @@ impl ProcessPlot {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check for new values from the receiver
-        let device_state = poll_device();
-        self.current_state = Some(device_state);
-        self.process_table.processes = self.current_state.as_ref().unwrap().processes.clone();
+        let system_state = poll_device();
+        self.current_state = Some(system_state.clone());
+        self.process_table.processes = self.current_state.as_ref().unwrap().process_state.processes.clone();
+        self.device_view.device_stats_plot.temperature_vals.push_back(system_state.device_state.temperature);
+        self.device_view.device_stats_plot.memory_usage_vals.push_back(system_state.device_state.mem_info.used / 1_000_000);
         self.process_table.sort_processes();
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
@@ -444,30 +495,30 @@ impl eframe::App for MyApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(device) = &mut self.current_state {
+            if let Some(system_state) = &mut self.current_state {
                 match self.current_tab {
                     Tab::Devices => {
                         ui.heading("Device Information");
                         ui.add_space(10.0);
 
-                        ui.label(format!("Device: {}", device.name));
-                        ui.label(format!("Driver version: {}", device.driver_version));
-                        ui.label(format!("CUDA version: {}", device.cuda_driver_version));
+                        ui.label(format!("Device: {}", system_state.device_state.name));
+                        ui.label(format!("Driver version: {}", system_state.device_state.driver_version));
+                        ui.label(format!("CUDA version: {}", system_state.device_state.cuda_driver_version));
 
                         ui.add_space(10.0);
 
-                        ui.label(format!("Temperature: {}°C", device.temperature));
+                        ui.label(format!("Temperature: {}°C", system_state.device_state.temperature));
                         ui.label(format!(
                             "Memory usage: {} MiB / {} MiB",
-                            device.mem_info.used / 1_000_000,
-                            device.mem_info.total / 1_000_000
+                            system_state.device_state.mem_info.used / 1_000_000,
+                            system_state.device_state.mem_info.total / 1_000_000
                         ));
 
-                        for (i, fan) in device.fan_speeds.iter().enumerate() {
+                        for (i, fan) in system_state.device_state.fan_speeds.iter().enumerate() {
                             ui.label(format!("Fan {} speed: {}%", i + 1, fan));
                         }
 
-                        // Add more device-specific information here
+                        self.device_view.device_stats_plot.plot_ui(ui);
                     }
                     Tab::Processes => {
                         ui.heading("Process Information");
@@ -475,11 +526,7 @@ impl eframe::App for MyApp {
 
                         self.process_table.table_ui(ui);
 
-                        if self.process_table.show_plot_window {
-                            ui.add_space(10.0);
-                            ui.heading("Process Plot");
-                            self.process_table.process_plot.process_plot_ui(ui);
-                        }
+                        if self.process_table.show_plot_window {}
                     }
                 }
             } else {
