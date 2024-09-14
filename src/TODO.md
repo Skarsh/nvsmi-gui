@@ -1,1 +1,4 @@
-- [] Freeze highlighted process in place, so that it doesn't jump around when sorting
+- [ ] Freeze highlighted process in place, so that it doesn't jump around when sorting
+- [ ] Separate graphs for device stats, e.g. temperature, memory usage, power etc.
+- [ ] Support for multiple devices
+- [ ] Graph view of per-process data, e.g. memory usage, processing consumption etc.
