@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use eframe::egui;
 
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
@@ -118,22 +120,31 @@ struct MyApp {
     device_view: DeviceView,
     process_table: ProcessTable,
     current_tab: Tab,
+    last_update: Instant,
+    update_interval: Duration,
 }
 
 impl MyApp {
     fn new() -> Self {
+        let current_state = poll_device();
+        let mut device_view = DeviceView::default();
+        device_view
+            .device_stats_plot
+            .set_max_memory_usage(current_state.device_state.mem_info.total / 1_000_000);
         Self {
-            current_state: None,
-            device_view: DeviceView::default(),
+            current_state: Some(current_state),
+            device_view,
             process_table: ProcessTable::default(),
             current_tab: Tab::Devices,
+            last_update: Instant::now(),
+            update_interval: Duration::from_millis(20),
         }
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for new values from the receiver
+        let now = Instant::now();
         let system_state = poll_device();
         self.current_state = Some(system_state.clone());
         self.process_table.processes = self
@@ -143,15 +154,19 @@ impl eframe::App for MyApp {
             .process_state
             .processes
             .clone();
-        self.device_view
-            .device_stats_plot
-            .temperature_vals
-            .push_back(system_state.device_state.temperature);
-        self.device_view
-            .device_stats_plot
-            .memory_usage_vals
-            .push_back(system_state.device_state.mem_info.used / 1_000_000);
         self.process_table.sort_processes();
+
+        if now.duration_since(self.last_update) >= self.update_interval {
+            self.device_view
+                .device_stats_plot
+                .temperature_vals
+                .push_back(system_state.device_state.temperature);
+            self.device_view
+                .device_stats_plot
+                .memory_usage_vals
+                .push_back(system_state.device_state.mem_info.used / 1_000_000);
+            self.last_update = now;
+        }
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -176,32 +191,39 @@ impl eframe::App for MyApp {
                     Tab::Devices => {
                         ui.heading("Device Information");
                         ui.add_space(10.0);
-
-                        ui.label(format!("Device: {}", system_state.device_state.name));
-                        ui.label(format!(
-                            "Driver version: {}",
-                            system_state.device_state.driver_version
-                        ));
-                        ui.label(format!(
-                            "CUDA version: {}",
-                            system_state.device_state.cuda_driver_version
-                        ));
-
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Device: {}", system_state.device_state.name));
+                            ui.label(format!(
+                                "Driver version: {}",
+                                system_state.device_state.driver_version
+                            ));
+                            ui.label(format!(
+                                "CUDA version: {}",
+                                system_state.device_state.cuda_driver_version
+                            ));
+                        });
                         ui.add_space(10.0);
 
-                        ui.label(format!(
-                            "Temperature: {}°C",
-                            system_state.device_state.temperature
-                        ));
-                        ui.label(format!(
-                            "Memory usage: {} MiB / {} MiB",
-                            system_state.device_state.mem_info.used / 1_000_000,
-                            system_state.device_state.mem_info.total / 1_000_000
-                        ));
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "Temperature: {}°C",
+                                system_state.device_state.temperature
+                            ));
+                            ui.label(format!(
+                                "Memory usage: {} MiB / {} MiB",
+                                system_state.device_state.mem_info.used / 1_000_000,
+                                system_state.device_state.mem_info.total / 1_000_000
+                            ));
+                        });
 
-                        for (i, fan) in system_state.device_state.fan_speeds.iter().enumerate() {
-                            ui.label(format!("Fan {} speed: {}%", i + 1, fan));
-                        }
+                        ui.horizontal(|ui| {
+                            for (i, fan) in system_state.device_state.fan_speeds.iter().enumerate()
+                            {
+                                ui.label(format!("Fan {} speed: {}%", i + 1, fan));
+                            }
+                        });
+
+                        ui.add_space(10.0);
 
                         self.device_view.device_stats_plot.plot_ui(ui);
                     }
