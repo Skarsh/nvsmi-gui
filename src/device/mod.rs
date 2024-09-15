@@ -26,6 +26,7 @@ pub struct DeviceState {
     pub temperature: u32,
     pub mem_info: MemoryInfo,
     pub fan_speeds: Vec<u32>,
+    pub power_usage: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -39,15 +40,20 @@ pub struct DeviceStatsPlot {
     max_temperature: u32,
     pub memory_usage_vals: CircularBuffer<5000, u64>,
     max_memory_usage: u64,
+    pub power_usage_vals: CircularBuffer<5000, u32>,
+    max_power_usage: u32,
 }
 
 impl Default for DeviceStatsPlot {
     fn default() -> Self {
         Self {
+            // TODO(Thomas): These max value asusmptions should come from a better place than this
             temperature_vals: CircularBuffer::new(),
             max_temperature: 100,
             memory_usage_vals: CircularBuffer::new(),
             max_memory_usage: 0,
+            power_usage_vals: CircularBuffer::new(),
+            max_power_usage: 1000,
         }
     }
 }
@@ -116,5 +122,31 @@ impl DeviceStatsPlot {
                     );
                 });
         });
+        Plot::new("power usage")
+            .width(ui.available_width() / 2.0)
+            .include_x(0)
+            .include_y(0)
+            .include_y(self.max_power_usage as f64)
+            .allow_zoom(false)
+            .allow_drag(false)
+            .allow_scroll(false)
+            .legend(Legend::default())
+            .x_axis_label("measurements")
+            .y_axis_label("W")
+            .show_grid(false)
+            .show(ui, |plot_ui| {
+                let power_usage_points: PlotPoints = self
+                    .power_usage_vals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &power_usage)| [i as f64, power_usage as f64])
+                    .collect();
+
+                plot_ui.line(
+                    Line::new(power_usage_points)
+                        .name("Power Usage")
+                        .color(Color32::from_rgb(207, 184, 54)),
+                );
+            });
     }
 }

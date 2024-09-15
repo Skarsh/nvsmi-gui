@@ -78,6 +78,7 @@ fn poll_device() -> SystemState {
         temperature: device.temperature(TemperatureSensor::Gpu).unwrap(),
         mem_info: device.memory_info().unwrap(),
         fan_speeds,
+        power_usage: device.power_usage().unwrap(),
     };
 
     SystemState {
@@ -165,6 +166,10 @@ impl eframe::App for MyApp {
                 .device_stats_plot
                 .memory_usage_vals
                 .push_back(system_state.device_state.mem_info.used / 1_000_000);
+            self.device_view
+                .device_stats_plot
+                .power_usage_vals
+                .push_back(system_state.device_state.power_usage / 1000);
             self.last_update = now;
         }
 
@@ -222,6 +227,11 @@ impl eframe::App for MyApp {
                                 ui.label(format!("Fan {} speed: {}%", i + 1, fan));
                             }
                         });
+
+                        ui.label(format!(
+                            "Power usage: {}W",
+                            system_state.device_state.power_usage / 1000
+                        ));
 
                         ui.add_space(10.0);
 
