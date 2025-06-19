@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use eframe::egui;
+use eframe::egui::{self};
 
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::Nvml;
@@ -8,7 +8,7 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 
 mod device;
-use device::{CudaDriverVersion, DeviceState, DeviceView};
+use device::{CudaDriverVersion, DeviceState, DeviceView, PlotKind};
 
 mod process;
 use process::{ProcessData, ProcessKind, ProcessState, ProcessTable};
@@ -233,7 +233,33 @@ impl eframe::App for MyApp {
                             system_state.device_state.power_usage / 1000
                         ));
 
-                        ui.add_space(10.0);
+                        ui.add_space(50.0);
+
+                        let container_response = ui.response();
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(50.0);
+                            ui.ctx().clone().with_accessibility_parent(
+                                container_response.id,
+                                || {
+                                    ui.selectable_value(
+                                        self.device_view.device_stats_plot.panel_mut(),
+                                        PlotKind::Memory,
+                                        "Memory",
+                                    );
+                                    ui.selectable_value(
+                                        self.device_view.device_stats_plot.panel_mut(),
+                                        PlotKind::Power,
+                                        "Power",
+                                    );
+                                    ui.selectable_value(
+                                        self.device_view.device_stats_plot.panel_mut(),
+                                        PlotKind::Temperature,
+                                        "Temperature",
+                                    );
+                                },
+                            );
+                        });
 
                         self.device_view.device_stats_plot.plot_ui(ui);
                     }
