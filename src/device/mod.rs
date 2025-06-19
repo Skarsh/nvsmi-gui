@@ -89,8 +89,7 @@ impl DeviceStatsPlot {
                         .collect();
 
                     plot_ui.line(
-                        Line::new(temperature_points)
-                            .name("GPU Temperature")
+                        Line::new("GPU Temperature", temperature_points)
                             .color(Color32::from_rgb(168, 68, 13)),
                     );
                 });
@@ -116,8 +115,7 @@ impl DeviceStatsPlot {
                         .collect();
 
                     plot_ui.line(
-                        Line::new(memory_usage_points)
-                            .name("Memory Usage")
+                        Line::new("Memory Usage", memory_usage_points)
                             .color(Color32::from_rgb(95, 118, 156)),
                     );
                 });
@@ -143,8 +141,7 @@ impl DeviceStatsPlot {
                     .collect();
 
                 plot_ui.line(
-                    Line::new(power_usage_points)
-                        .name("Power Usage")
+                    Line::new("Power Usage", power_usage_points)
                         .color(Color32::from_rgb(207, 184, 54)),
                 );
             });
